@@ -1,0 +1,16 @@
+# Move into the project directory
+cd /Users/amanjha/Desktop/hackathon
+
+# Create and activate a python environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install the required ML packages
+pip install -r requirements.txt
+
+# Run the Offline Phase 1 (takes ~10-15 mins)
+python precompute.py
+
+# Run the Online Phase 2 (takes < 5 mins)
+python rank.py
+
