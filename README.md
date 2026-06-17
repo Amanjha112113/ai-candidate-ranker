@@ -7,14 +7,15 @@ Our approach abandons pure semantic search in favor of a **3-Pillar Blend**: Rul
 ### Phase 1: Pre-Computation (`precompute.py`)
 Runs entirely offline to extract robust features and perform dataset-wide checks:
 - **Strict JD Rule Extraction**: Computes hard disqualifiers (e.g., must have production experience, must have recent coding).
-- **Skill Credibility**: Cross-references every claimed skill against actual job descriptions. Penalizes "keyword stuffers".
-- **Honeypot Validation**: Runs 16 calibrated checks + H17 (Skill-Job Mismatch) + H18 (Rare Skill Combos).
+- **Skill Credibility**: Semantic skill corroboration against career-text embeddings. Penalizes "keyword stuffers".
+- **Honeypot Validation**: Runs 16 calibrated checks + H18 (Rare Skill Combos) + H19 (Skill Inflation). H17 removed.
 - **Behavioral Scoring**: Computes exactly 5 composite multipliers (Availability, Market Validation, Trust, Reliability, Technical) from the 23 behavioral signals.
-- **Artifact Generation**: Saves dense embeddings (`BAAI/bge-small-en-v1.5`) and feature JSONs.
+- **Narrative Authenticity**: Detects high-frequency synthetic filler descriptions to discount untrustworthy semantic scores.
+- **Artifact Generation**: Saves dual dense embeddings (career and skills) and feature JSONs.
 
 ### Phase 2: Online Ranking (`rank.py`)
 Runs strictly under the 5-minute CPU-only constraint (typically < 5 seconds):
-- **Stage 1 (Semantic FAISS)**: High-speed dot-product retrieval of candidate embeddings vs the JD intent vector.
+- **Stage 1 (Semantic)**: High-speed dot-product retrieval of candidate embeddings vs the JD intent vector using separate career and skills arrays.
 - **Final Fit Blending (3-Pillar System)**: 
   - `30% Rule-Based Score` (Enforces hard JD disqualifiers)
   - `30% Semantic Score` (Cosine Similarity)

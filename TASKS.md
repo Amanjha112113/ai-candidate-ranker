@@ -18,7 +18,9 @@
 
 ## Senior Engineer Review Fixes (Completed)
 - [x] **[L1]** Fix broken multiplicative skill score → Harmonic Mean × log1p(Duration)
-- [x] **[L2]** Remove AI penalty vector → Replaced with CPU-cheap Stylometry (TTR + Burstiness) as flag-only
-- [x] **[L3]** Adaptive Early Exit Cross-Encoder → average runtime ~90s vs old ~250s
-- [x] **[L4]** FAISS index + JD hash for delta invalidation → JD re-encode in 0.5s, not full 30min recompute
+- [x] **[L2]** Eliminate double behavioral_signals computation in precompute.
+- [x] **[L3]** Synthetic Data Artifact: Implemented `build_filler_templates` to detect reused descriptions across candidates.
+- [x] **[L4]** Added `narrative_authenticity` to dynamically gate Semantic Score (trusting skills over career if filler is detected).
 - [x] **[L5]** Fix H19 Skill Inflation → max(single_skill_dur) > career*1.2 instead of broken sum check
+- [x] **[L6]** Removed H17 completely due to 100% false-positive rate on synthetic dataset.
+- [x] **[L7]** Optimized precomputation to use bulk HF dataset encoding with progress bars (~5 min offline).

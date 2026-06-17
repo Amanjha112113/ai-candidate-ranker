@@ -16,19 +16,21 @@ The pipeline is strictly divided into an **Offline Pre-computation Phase** and a
    - **Technical Credibility**: Uses GitHub scores, assessment counts, and interview rates.
 5. **SOTA Honeypot Validation (H01-H19)**:
    - Fixed H07 (Salary) to only penalize if paired with other red flags.
-   - Added H17 (Skill-Job Mismatch) checking if <20% of skills match job titles.
+   - Removed H17 (Skill-Job Mismatch) as it had a 100% false positive rate on synthetic data.
    - Added H18 (Rare Skill Combo) using global dataset frequencies to flag impossible expert claims.
-6. **Semantic Artifacts**:
-   - Computes dense embeddings (`BAAI/bge-small-en-v1.5`) for core profile fields (title, summary, advanced skills).
-   - FAISS Index built for ultra-fast online ranking.
+   - Added H19 (Skill Inflation) to catch duration claims exceeding total career length.
+6. **Semantic Artifacts & Narrative Authenticity**:
+   - Computes separate dense embeddings (`BAAI/bge-small-en-v1.5`) for career text and skills text.
+   - **Filler Template Detection**: Scans the dataset for high-frequency stock descriptions (synthetic data artifact). Generates a `narrative_authenticity` score to dynamically weight the semantic score.
+   - Avoids FAISS overhead; uses high-speed batch dot products online.
 
 ### Online Ranking Phase (`rank.py`)
 Runs completely offline in ~2 seconds (well under the 5-minute CPU-only constraint):
 1. **Semantic Scoring**: FAISS/NumPy dot product of candidate embeddings vs. JD intent vector.
 2. **3-Pillar Evaluation**:
    - **Pillar 1: Rule-Based Score (30%)**: Enforces hard JD disqualifiers (zero score if no production experience or no recent coding). Awards points for ranking experience and avoids consulting-only backgrounds.
-   - **Pillar 2: Semantic Score (30%)**: Cosine similarity.
-   - **Pillar 3: Credibility Score (40%)**: `Skill Credibility * Technical Credibility * Consulting Penalty * Honeypot Penalties`.
+   - **Pillar 2: Semantic Score (30%)**: Authenticity-gated cosine similarity. Blends Career Semantic and Skills Semantic dynamically. (e.g. 70/30 split if descriptions are authentic, 38/62 split if descriptions are synthetic filler).
+   - **Pillar 3: Credibility Score (40%)**: `Skill Corroboration * Career Consistency * External Validation * Title Chaser * Technical Credibility * Consulting Penalty * Honeypot Penalties`.
 3. **Final Scoring**:
    - `Final = (0.3 * Rule + 0.3 * Semantic + 0.4 * Credibility) * Behavioral_Multiplier`
 4. **Reasoning**: Generates transparent score breakdowns.
@@ -39,8 +41,9 @@ Runs completely offline in ~2 seconds (well under the 5-minute CPU-only constrai
 
 | Flaw | Old Approach | Fixed Approach | Verdict |
 |---|---|---|---|
-| Skill Inflation | Blindly trusted durations | `calculate_skill_credibility` checks job descriptions for skill presence | ✅ Fixed |
+| Skill Inflation | Blindly trusted durations | Added H19 to ensure max single skill duration <= career length * 1.2 | ✅ Fixed |
 | JD Interpretation | Heavy semantic embedding reliance | Strict rule-based Stage 1 with hard zeros for missing production/recency | ✅ Fixed |
-| Ranking Experience | Narrow exact match | Semantic clusters + title weighting | ✅ Fixed |
-| Reranking Speed | Cross-Encoder (~90s) | Replaced with FAISS dot product + 3-Pillar blend (~2s) | ✅ Fixed |
+| Synthetic Description Reuse | Trusted all career texts | Added Filler Template Detection and Narrative Authenticity gating | ✅ Fixed |
+| Reranking Speed | Cross-Encoder (~90s) | Replaced with NumPy dot product + 3-Pillar blend (<5s) | ✅ Fixed |
 | H07 Salary Mismatch | Blind penalty on 18% of pool | Only penalizes if other soft flags are present | ✅ Fixed |
+| False Positive H17 | Blindly penalized mismatched titles/skills | Removed H17 completely based on empirical data | ✅ Fixed |
