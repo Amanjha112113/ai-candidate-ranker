@@ -167,7 +167,6 @@ def main():
     print(f"Writing {config.FINAL_TOP_K} results to CSV...")
     with open(config.SUBMISSION_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["candidate_id", "rank", "score", "reasoning"])
-        writer.writeheader()
         
         for rank, idx in enumerate(top_100_idx, 1):
             c = cdata[idx]
