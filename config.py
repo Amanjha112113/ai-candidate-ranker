@@ -1,7 +1,17 @@
 import os
+import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get('CANDIDATES_DIR', '/Users/amanjha/Desktop/India_runs_data_and_ai_challenge')
+
+# Detect Google Colab (works in notebook kernel and subprocesses like !python)
+IS_COLAB = 'google.colab' in sys.modules or 'COLAB_RELEASE_TAG' in os.environ or os.path.exists('/content/drive')
+
+if IS_COLAB:
+    DEFAULT_DATA_DIR = '/content/drive/MyDrive/India_runs_data_and_ai_challenge'
+else:
+    DEFAULT_DATA_DIR = '/Users/amanjha/Desktop/India_runs_data_and_ai_challenge'
+
+DATA_DIR = os.environ.get('CANDIDATES_DIR', DEFAULT_DATA_DIR)
 
 ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
 CANDIDATES_PATH = os.path.join(DATA_DIR, "candidates.jsonl")

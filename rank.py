@@ -4,6 +4,8 @@ import pickle
 import json
 import csv
 import numpy as np
+import torch
+import math
 
 import config
 from reasoning_generator import generate_reasoning
@@ -38,8 +40,21 @@ def main():
     if len(jd_emb.shape) == 1:
         jd_emb = jd_emb.reshape(1, -1)
         
-    career_sims = np.dot(career_embs, jd_emb.T).flatten()
-    skills_sims = np.dot(skills_embs, jd_emb.T).flatten()
+    if torch.cuda.is_available():
+        print("Using GPU for fast matrix multiplication...")
+        career_tensor = torch.tensor(career_embs, device='cuda', dtype=torch.float16)
+        skills_tensor = torch.tensor(skills_embs, device='cuda', dtype=torch.float16)
+        jd_tensor = torch.tensor(jd_emb.T, device='cuda', dtype=torch.float16)
+        
+        career_sims = torch.matmul(career_tensor, jd_tensor).cpu().numpy().flatten()
+        skills_sims = torch.matmul(skills_tensor, jd_tensor).cpu().numpy().flatten()
+        
+        del career_tensor
+        del skills_tensor
+        del jd_tensor
+    else:
+        career_sims = np.dot(career_embs, jd_emb.T).flatten()
+        skills_sims = np.dot(skills_embs, jd_emb.T).flatten()
         
     print(f"Semantic scoring complete in {time.time() - t:.2f}s")
     
@@ -55,18 +70,29 @@ def main():
         feat = feat_map.get(cid, {})
         
         # ── Pillar 1: Rule-Based Score (0.0 to 1.0)
-        rule_score = 0.0
-        if feat.get('production_score', 0) > 0:
-            rule_score += 0.3
-        if feat.get('code_recency_score', 0) > 0:
-            rule_score += 0.3
-        if feat.get('ranking_score', 0) > 0:
-            rule_score += 0.2
-        if feat.get('consulting_penalty', 1.0) > 0.5:
-            rule_score += 0.2
+        # Use GRADUAL scoring instead of binary thresholds
+        # so deeper production/ranking experience is rewarded
+        prod_score = feat.get('production_score', 0)
+        recency = feat.get('code_recency_score', 0)
+        rank_exp = feat.get('ranking_score', 0)
+        consult = feat.get('consulting_penalty', 1.0)
+        
+        # Gradual production score: log scale, capped at 0.35
+        rule_score = min(0.35, 0.15 * math.log1p(prod_score))
+        
+        # Recency is binary but worth 0.25
+        if recency > 0:
+            rule_score += 0.25
+            
+        # Ranking experience: gradual, capped at 0.25
+        rule_score += min(0.25, rank_exp * 0.05)
+        
+        # Consulting bonus (non-consulting career)
+        if consult > 0.5:
+            rule_score += 0.15
             
         # Hard Disqualifiers - MUST HAVE production & recent coding
-        if feat.get('production_score', 0) == 0 or feat.get('code_recency_score', 0) == 0:
+        if prod_score == 0 or recency == 0:
             rule_score = 0.0
             
         # ── Pillar 2: Semantic Score (0.0 to 1.0)
@@ -103,6 +129,8 @@ def main():
             
         cred_score *= feat.get('title_chaser_penalty', 1.0)
         cred_score *= feat.get('external_validation_penalty', 1.0)
+        cred_score *= feat.get('research_penalty', 1.0)  # Penalize pure research
+        cred_score *= feat.get('production_depth_boost', 1.0)  # Reward deep production experience
             
         # Behavioral Multiplier (Logistics)
         beh_mult = feat.get('behavioral_multiplier', 1.0)

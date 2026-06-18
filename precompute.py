@@ -6,6 +6,8 @@ import pickle
 import hashlib
 import numpy as np
 from sentence_transformers import SentenceTransformer
+import torch
+import gc
 
 import config
 from honeypot_checks import run_honeypot_checks
@@ -316,6 +318,83 @@ def calculate_external_validation_penalty(candidate):
     return 1.0
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 8. RESEARCH TITLE PENALTY (JD explicitly disqualifies pure research)
+# ─────────────────────────────────────────────────────────────────────────────
+def calculate_research_penalty(candidate):
+    """
+    The JD explicitly states: 'If you've spent your career in pure research 
+    environments... without any production deployment — we will not move forward.'
+    
+    Penalizes candidates with 'research' in their titles who lack strong 
+    production evidence. Does NOT penalize research titles that also have 
+    clear production signals (they are valuable hybrids).
+    """
+    current_title = candidate.get('profile', {}).get('current_title', '').lower()
+    career_titles = [job.get('title', '').lower() for job in candidate.get('career_history', [])]
+    all_titles = career_titles + [current_title]
+    
+    # Count how many roles have "research" in the title
+    research_count = sum(1 for t in all_titles if 'research' in t)
+    total_roles = max(len(all_titles), 1)
+    research_ratio = research_count / total_roles
+    
+    if research_ratio == 0:
+        return 1.0  # No research titles at all — no penalty
+    
+    # Check for production evidence across career descriptions
+    production_signals = ['production', 'shipped', 'deployed', 'launched', 'released',
+                         'scaling', 'scale', 'users', 'customers', 'real-world',
+                         'served', 'traffic', 'api', 'pipeline', 'microservice']
+    
+    production_evidence = 0
+    for job in candidate.get('career_history', []):
+        desc = job.get('description', '').lower()
+        if any(sig in desc for sig in production_signals):
+            production_evidence += 1
+    
+    if production_evidence >= 2:
+        return 1.0   # Strong production evidence — hybrid researcher, no penalty
+    elif production_evidence == 1:
+        # Some production, but mostly research
+        if research_ratio > 0.5:
+            return 0.85
+        return 0.95
+    else:
+        # No production evidence + research titles
+        if research_ratio > 0.5:
+            return 0.6   # Mostly research career — heavy penalty
+        return 0.75      # Some research roles — moderate penalty
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. PRODUCTION DEPTH BOOST (rewards multi-company production experience)
+# ─────────────────────────────────────────────────────────────────────────────
+def calculate_production_depth_boost(candidate):
+    """
+    Counts the number of distinct roles with production evidence.
+    Candidates who shipped at 3+ companies (e.g., Swiggy, Uber, Zomato)
+    should score significantly higher than someone with 1 production role.
+    """
+    production_signals = ['production', 'shipped', 'deployed', 'launched', 'released',
+                         'scaling', 'scale', 'users', 'customers', 'real-world',
+                         'served', 'traffic', 'api', 'pipeline', 'microservice',
+                         'millions', 'latency', 'throughput', 'sla']
+    
+    production_roles = 0
+    for job in candidate.get('career_history', []):
+        desc = job.get('description', '').lower()
+        if any(sig in desc for sig in production_signals):
+            production_roles += 1
+    
+    if production_roles >= 3:
+        return 1.15  # Strong multi-company production depth
+    elif production_roles >= 2:
+        return 1.08
+    elif production_roles >= 1:
+        return 1.0
+    else:
+        return 0.85  # No production evidence at all
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
@@ -352,7 +431,10 @@ def main():
 
     # ── Load model and encode JD ─────────────────────────────────────────────
     print("Loading Semantic Model...")
-    model = SentenceTransformer(config.EMBEDDING_MODEL_NAME)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    model = SentenceTransformer(config.EMBEDDING_MODEL_NAME, device=device)
+    encode_batch_size = 2048 if device == "cuda" else 256
     jd_emb = load_or_encode_jd(model, JD_INTENT)
     
     print("Encoding all unique skills for corroboration...")
@@ -383,6 +465,8 @@ def main():
             "career_consistency_penalty": calculate_career_consistency(c),
             "title_chaser_penalty": calculate_title_chaser_penalty(c),
             "external_validation_penalty": calculate_external_validation_penalty(c),
+            "research_penalty": calculate_research_penalty(c),
+            "production_depth_boost": calculate_production_depth_boost(c),
             "honeypot_flags": hp,
             "behavioral_multiplier": beh_signals.get("behavioral_multiplier", 1.0),
             "jd_fit_multiplier": beh_signals.get("jd_fit_multiplier", 1.0),
@@ -418,7 +502,7 @@ def main():
         normalize_embeddings=True,
         show_progress_bar=True,
         convert_to_numpy=True,
-        batch_size=256
+        batch_size=encode_batch_size
     ).astype(np.float16)
     
     print(f"Encoding {len(all_skills_texts)} skills texts...")
@@ -427,9 +511,9 @@ def main():
         normalize_embeddings=True,
         show_progress_bar=True,
         convert_to_numpy=True,
-        batch_size=256
+        batch_size=encode_batch_size
     ).astype(np.float16)
-
+    
     # ── Skill Corroboration (fast vectorized dot products) ────────────────────
     print("Computing skill corroboration scores...")
     for idx, c in enumerate(candidates):
@@ -454,6 +538,11 @@ def main():
             cred_penalty = 0.3
             
         features[cid]["skill_corroboration_penalty"] = cred_penalty
+
+    # Free memory
+    del all_career_texts
+    del all_skills_texts
+    gc.collect()
 
     # ── Save embeddings ──────────────────────────────────────────────────────
     print("Saving embeddings...")

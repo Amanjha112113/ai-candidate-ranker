@@ -109,10 +109,10 @@ def compute_behavioral_signals(candidate):
     offer = sig.get("offer_acceptance_rate", -1)
     offer_norm = 0.5 if offer < 0 else 0.3 + 0.7 * offer
     
-    # 21-23. Verified
-    email = 1.0 if sig.get("verified_email") else 0.3
-    phone = 1.0 if sig.get("verified_phone") else 0.3
-    linkedin = 1.0 if sig.get("linkedin_connected") else 0.3
+    # 21-23. Verified (softened from 0.3 → 0.6; platform verification is not a strong career signal)
+    email = 1.0 if sig.get("verified_email") else 0.6
+    phone = 1.0 if sig.get("verified_phone") else 0.6
+    linkedin = 1.0 if sig.get("linkedin_connected") else 0.5
 
     # Composites
     availability = (
