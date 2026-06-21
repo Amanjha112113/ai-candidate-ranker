@@ -35,7 +35,7 @@ def main():
     cdata, career_embs, skills_embs, feat_map, jd_emb = load_artifacts()
     
     # ── Stage 1: Fast FAISS/NumPy Semantic Scoring ───────────────────────────
-    print("Executing Semantic Search...")
+    print("Executing Stage 1: Bi-Encoder Semantic Search...")
     t = time.time()
     if len(jd_emb.shape) == 1:
         jd_emb = jd_emb.reshape(1, -1)
@@ -58,58 +58,37 @@ def main():
         
     print(f"Semantic scoring complete in {time.time() - t:.2f}s")
     
-    # ── Stage 2: Final Blending ──────────────────────────────────────────────
-    print("Executing 3-Pillar Blend Scoring...")
+    # ── Stage 1: Filtering Top 500 ──────────────────────────────────────────
+    print(f"Executing Stage 1: Filtering Top {config.TOP_K_STAGE_1}...")
     t = time.time()
     
-    final_scores = []
-    scores_map = {}
+    stage1_scores = []
     
     for i, candidate in enumerate(cdata):
         cid = candidate["candidate_id"]
         feat = feat_map.get(cid, {})
         
         # ── Pillar 1: Rule-Based Score (0.0 to 1.0)
-        # Use GRADUAL scoring instead of binary thresholds
-        # so deeper production/ranking experience is rewarded
         prod_score = feat.get('production_score', 0)
         recency = feat.get('code_recency_score', 0)
         rank_exp = feat.get('ranking_score', 0)
         consult = feat.get('consulting_penalty', 1.0)
         
-        # Gradual production score: log scale, capped at 0.35
         rule_score = min(0.35, 0.15 * math.log1p(prod_score))
-        
-        # Recency is binary but worth 0.25
-        if recency > 0:
-            rule_score += 0.25
-            
-        # Ranking experience: gradual, capped at 0.25
+        if recency > 0: rule_score += 0.25
         rule_score += min(0.25, rank_exp * 0.05)
-        
-        # Consulting bonus (non-consulting career)
-        if consult > 0.5:
-            rule_score += 0.15
+        if consult > 0.5: rule_score += 0.15
+        if prod_score == 0 or recency == 0: rule_score = 0.0
             
-        # Hard Disqualifiers - MUST HAVE production & recent coding
-        if prod_score == 0 or recency == 0:
-            rule_score = 0.0
-            
-        # ── Pillar 2: Semantic Score (0.0 to 1.0)
-        # Convert -1..1 to 0..1
+        # ── Pillar 2: Stage 1 Semantic Score (0.0 to 1.0)
         sem_score_career = (float(career_sims[i]) + 1) / 2.0
         sem_score_skills = (float(skills_sims[i]) + 1) / 2.0
         
-        # Narrative authenticity gates how much we trust the career embedding.
-        # If career descriptions are filler templates from the synthetic data bank,
-        # they carry no real signal — discount career_sim, lean on skills/title.
         authenticity = feat.get('narrative_authenticity', 1.0)
         
-        # Dynamic blending: high authenticity = trust career (70/30),
-        # low authenticity = trust skills more (30/70)
-        career_weight = 0.3 + 0.4 * authenticity  # ranges from 0.38 to 0.70
-        skills_weight = 1.0 - career_weight         # ranges from 0.30 to 0.62
-        sem_score = career_weight * sem_score_career + skills_weight * sem_score_skills
+        # Priority 3: Multiply base semantic score by authenticity score
+        base_sem_score = 0.5 * sem_score_career + 0.5 * sem_score_skills
+        stage1_sem_score = base_sem_score * authenticity
         
         # ── Pillar 3: Credibility Score (Anti-Stuffer)
         cred_score = (
@@ -119,7 +98,6 @@ def main():
             feat.get('career_consistency_penalty', 1.0)
         )
         
-        # Honeypot Penalties
         hp = feat.get('honeypot_flags', {})
         if hp.get('hard', False):
             cred_score = 0.0
@@ -129,40 +107,146 @@ def main():
             
         cred_score *= feat.get('title_chaser_penalty', 1.0)
         cred_score *= feat.get('external_validation_penalty', 1.0)
-        cred_score *= feat.get('research_penalty', 1.0)  # Penalize pure research
-        cred_score *= feat.get('production_depth_boost', 1.0)  # Reward deep production experience
+        cred_score *= feat.get('research_penalty', 1.0)
+        cred_score *= feat.get('production_depth_boost', 1.0)
             
-        # Behavioral Multiplier (Logistics)
+        # Behavioral Multiplier
         beh_mult = feat.get('behavioral_multiplier', 1.0)
         jd_fit = feat.get('jd_fit_multiplier', 1.0)
             
-        # ── Final Blend (30% Rule, 30% Semantic, 40% Credibility)
+        # Stage 1 Blend
         blend = (
             0.3 * rule_score +
-            0.3 * sem_score +
+            0.3 * stage1_sem_score +
+            0.4 * cred_score
+        )
+        
+        final_score = blend * beh_mult * jd_fit
+        
+        stage1_scores.append((final_score, cid, i, stage1_sem_score, rule_score, cred_score, beh_mult, jd_fit))
+        
+    print(f"Stage 1 scoring complete in {time.time() - t:.2f}s")
+    
+    stage1_scores.sort(key=lambda x: (-x[0], x[1]))
+    top_500 = stage1_scores[:config.TOP_K_STAGE_1]
+    
+    # ── Stage 2: Cross-Encoder Reranking ────────────────────────────────────
+    print(f"Executing Stage 2: Cross-Encoder Reranking for Top {config.TOP_K_STAGE_1}...")
+    t = time.time()
+
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    from sentence_transformers import SentenceTransformer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load bi-encoder once for smart job selection (Top-3 relevant jobs per candidate).
+    # Only runs on 500 candidates — fast enough online (<15s on CPU).
+    print("Loading bi-encoder for smart job selection...")
+    bi_encoder = SentenceTransformer(config.EMBEDDING_MODEL_NAME, device=str(device))
+    bi_encoder.eval()
+
+    def get_relevant_jobs(candidate, jd_vec, top_k=3):
+        """
+        Select top-k most relevant job descriptions for a candidate by scoring
+        each job description individually against the JD using the bi-encoder.
+        This avoids the dumb first-512-token truncation that loses senior
+        candidates' most relevant (often earlier) roles.
+
+        Returns a single string of the top-k job texts concatenated.
+        """
+        job_scores = []
+        for job in candidate.get('career_history', []):
+            text = job.get('description', '').strip()
+            if not text:
+                continue
+            # Encode this single job description on-the-fly
+            emb = bi_encoder.encode(
+                ["Represent this document for retrieval: " + text[:400]],
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False
+            )
+            sim = float(np.dot(emb.flatten(), jd_vec.flatten()))
+            job_scores.append((sim, text[:400]))
+
+        # Sort by descending similarity, take top-k
+        job_scores.sort(key=lambda x: -x[0])
+        top_texts = [text for _, text in job_scores[:top_k]]
+        return " ".join(top_texts) if top_texts else ""
+
+    # Flatten JD embedding for dot-product comparison inside get_relevant_jobs
+    jd_vec = jd_emb.flatten()
+
+    # Load cross-encoder model
+    tokenizer = AutoTokenizer.from_pretrained(config.CROSS_ENCODER_MODEL_NAME)
+    ce_model = AutoModelForSequenceClassification.from_pretrained(config.CROSS_ENCODER_MODEL_NAME)
+    ce_model.eval()
+    ce_model.to(device)
+
+    # Build (JD, smart_career_text) pairs for the Top 500
+    print("Selecting top-3 most relevant jobs per candidate for cross-encoder input...")
+    pairs = []
+    for candidate_tuple in top_500:
+        idx = candidate_tuple[2]
+        c = cdata[idx]
+        # Smart selection: top-3 most JD-relevant job descriptions
+        career_text = get_relevant_jobs(c, jd_vec, top_k=3)
+        pairs.append([JD_INTENT, career_text])
+        
+    ce_logits = []
+    batch_size = 32
+    
+    with torch.inference_mode():
+        for i in range(0, len(pairs), batch_size):
+            batch_pairs = pairs[i:i+batch_size]
+            inputs = tokenizer(batch_pairs, padding=True, truncation=True, return_tensors='pt', max_length=512).to(device)
+            outputs = ce_model(**inputs)
+            logits = outputs.logits.squeeze(-1).cpu().tolist()
+            if isinstance(logits, float):
+                ce_logits.append(logits)
+            else:
+                ce_logits.extend(logits)
+                
+    # Priority 2: Min-Max Scaling
+    min_ce = min(ce_logits)
+    max_ce = max(ce_logits)
+    ce_range = max_ce - min_ce if max_ce > min_ce else 1.0
+    ce_scores_normalized = [(score - min_ce) / ce_range for score in ce_logits]
+    
+    print(f"Stage 2 Cross-Encoder complete in {time.time() - t:.2f}s")
+    
+    # ── Final Blending ──────────────────────────────────────────────────────
+    print("Executing Final Blend Scoring...")
+    final_top_500 = []
+    scores_map = {}
+    
+    for i, candidate_tuple in enumerate(top_500):
+        _, cid, idx, stage1_sem_score, rule_score, cred_score, beh_mult, jd_fit = candidate_tuple
+        
+        ce_score = ce_scores_normalized[i]
+        sem_final = 0.5 * stage1_sem_score + 0.5 * ce_score
+        
+        blend = (
+            0.3 * rule_score +
+            0.3 * sem_final +
             0.4 * cred_score
         )
         
         final_score = blend * beh_mult * jd_fit
         rounded_score = round(final_score, 4)
         
-        scores_map[i] = {
+        final_top_500.append((rounded_score, cid, idx))
+        
+        scores_map[idx] = {
             "final": rounded_score,
             "rule": rule_score,
-            "semantic": sem_score,
+            "semantic": sem_final,
             "credibility": cred_score,
             "behavioral": beh_mult
         }
-        
-        final_scores.append((rounded_score, cid, i))
-        
-    print(f"Scoring complete in {time.time() - t:.2f}s")
-    
-    # ── Sort and Output ──────────────────────────────────────────────────────
+
     # Sort strictly: Score Descending, ID Ascending
-    final_scores.sort(key=lambda x: (-x[0], x[1]))
-    
-    top_100_idx = [idx for _, _, idx in final_scores[:config.FINAL_TOP_K]]
+    final_top_500.sort(key=lambda x: (-x[0], x[1]))
+    top_100_idx = [idx for _, _, idx in final_top_500[:config.FINAL_TOP_K]]
     
     print(f"Writing {config.FINAL_TOP_K} results to CSV...")
     with open(config.SUBMISSION_PATH, "w", newline="", encoding="utf-8") as f:
@@ -174,7 +258,7 @@ def main():
             cid = c["candidate_id"]
             s = scores_map[idx]
             
-            # Use actual reasoning generator
+            # Priority 4: Use actual reasoning generator
             reasoning = generate_reasoning(c, rank, s)
             
             writer.writerow({
