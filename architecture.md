@@ -16,7 +16,7 @@ graph TD
     subgraph Offline Phase: Precompute Engine
     C[precompute.py]
     D[Feature Extraction: Rules, Honeypot, Behavioral]
-    E[Semantic Encoding: bge-large Bi-Encoder]
+    E[Semantic Encoding: bge-small Bi-Encoder]
     end
 
     subgraph Artifact Storage
@@ -67,7 +67,7 @@ Because processing 200k+ candidates in real-time is too slow, the system pushes 
 1. **Data Ingestion**: Parses raw `candidates.jsonl` (or `.gz`) files.
 2. **Global Analytics**: Computes global frequencies of skills across the entire candidate pool to identify rare vs. common skills.
 3. **Semantic Encoding**:
-   - Uses `SentenceTransformer` (`BAAI/bge-large-en-v1.5`) to convert the Job Description, Candidate Career History, and Candidate Skills into high-dimensional (1024-dim) dense vectors.
+   - Uses `SentenceTransformer` (`BAAI/bge-small-en-v1.5`) to convert the Job Description, Candidate Career History, and Candidate Skills into high-dimensional (384-dim) dense vectors.
    - Saves these vectors to disk as optimized `.npy` binaries.
 4. **Behavioral & Honeypot Analysis**:
    - `honeypot_checks.py`: Evaluates logic rules (e.g., overlapping full-time careers, impossible timeline math) to detect fake or inflated profiles.
@@ -108,7 +108,7 @@ It uses robust heuristic pseudo-labels (combining production experience, recency
 
 The architecture heavily relies on file-based artifact caching to pass state between the offline and online engines.
 
-- **`embeddings.npy`**: NumPy arrays holding FP16 compressed 1024-dim vector embeddings. Extremely fast to load into memory.
+- **`embeddings.npy`**: NumPy arrays holding FP16 compressed 384-dim vector embeddings. Extremely fast to load into memory.
 - **`features.json`**: Key-value map of `candidate_id` to pre-calculated numerical features (e.g., honeypot flags, production score, behavioral multiplier).
 - **`candidate_data.pkl`**: Pickled Python objects retaining the full raw JSON of each candidate, required for generating the final reasoning text.
 

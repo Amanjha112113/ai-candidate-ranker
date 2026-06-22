@@ -32,7 +32,7 @@ FEATURES_PATH = os.path.join(ARTIFACTS_DIR, "features.json")
 SUBMISSION_PATH = os.path.join(BASE_DIR, "submission.csv")
 
 # Models
-EMBEDDING_MODEL_NAME = "BAAI/bge-large-en-v1.5"  # Upgraded from bge-small (33M) to bge-large (335M, 1024-dim)
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"  # Reverted to bge-small (33M, 384-dim) for speed and memory efficiency
                                                     # Higher semantic accuracy; only affects precompute.py (offline).
 CROSS_ENCODER_MODEL_NAME = "BAAI/bge-reranker-base"
 
