@@ -434,7 +434,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     model = SentenceTransformer(config.EMBEDDING_MODEL_NAME, device=device)
-    encode_batch_size = 2048 if device == "cuda" else 256
+    encode_batch_size = 256 if device == "cuda" else 64
     jd_emb = load_or_encode_jd(model, JD_INTENT)
     
     print("Encoding all unique skills for corroboration...")
