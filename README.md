@@ -165,6 +165,26 @@ graph LR
 
 ---
 
+## 🔬 Deep Engineering & Technical Details
+
+For judges and technical reviewers, here is a deeper look into the engineering decisions that make this system robust and highly performant:
+
+### 1. Memory Efficiency & Token Budgeting
+* **OOM Prevention:** Loading 200,000+ raw JSON profiles into RAM simultaneously causes an Out-Of-Memory (OOM) crash on most laptops. We solved this by using chunked batch-processing during the `precompute.py` phase and saving data directly to disk.
+* **Smart Token Reservation:** Standard Cross-Encoders have a strict 512-token limit. If we feed an entire resume into the model, the Job Description (JD) might get truncated. We explicitly pre-truncate the candidate's historical career text to exactly 300 characters *after* keyword scoring, ensuring the JD always fits comfortably within the remaining token budget.
+
+### 2. Time Complexity & Vector Math
+* **PyTorch Matrix Multiplication over Loops:** Instead of using slow `for` loops to calculate cosine similarity, we convert all 200,000+ candidate embeddings into a single `float16` PyTorch tensor. The Stage 1 similarity scoring is executed via a single `torch.matmul(candidates, jd_tensor)` operation, reducing search time from minutes to milliseconds.
+* **Cross-Encoder Batching:** The Cross-Encoder is computationally heavy. By restricting it to only the Top 500 candidates (filtered by the Bi-Encoder) and passing data through `torch.inference_mode()` in batches of 32, we prevent bottlenecking and eliminate gradient-tracking memory overhead.
+
+### 3. The "Honeypot" Logic Engine
+Our credibility score relies on 18+ strict python heuristics designed to catch "resume stuffers":
+* **Timeline Math Checks:** Candidates whose total duration of overlapping full-time jobs mathematically exceeds the actual time elapsed are flagged (e.g., claiming 5 years of concurrent full-time experience in a 2-year window).
+* **Zero-Duration Experts:** Candidates who claim "Expert" proficiency in complex frameworks (e.g., PyTorch, Kubernetes) but have exactly `0` months of recorded duration for those skills are penalized.
+* **Domain Penalty:** Candidates with purely Computer Vision (CV) or Speech titles (with zero NLP/Retrieval cross-over) face a severe multiplicative penalty, ensuring they do not outrank true Search/Ranking engineers.
+
+---
+
 ## 🚀 Setup & Execution
 
 ### Prerequisites
