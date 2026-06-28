@@ -85,7 +85,7 @@ def compute_behavioral_signals(candidate):
     
     loc = prof.get("location", "").lower()
     willing = sig.get("willing_to_relocate", False)
-    if "pune" in loc or "noida" in loc or "delhi" in loc or "mumbai" in loc or "hyderabad" in loc or "ncr" in loc:
+    if "pune" in loc or "noida" in loc or "delhi" in loc or "mumbai" in loc or "hyderabad" in loc or "ncr" in loc or "bangalore" in loc or "bengaluru" in loc:
         relocation_score = 1.0
     else:
         relocation_score = 0.7 if willing else 0.5

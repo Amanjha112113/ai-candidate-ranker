@@ -88,10 +88,57 @@ def calculate_recency_score(candidate):
         is_current = job.get('is_current', False)
         end_date = job.get('end_date')
         
-        if is_current or (end_date and end_date.startswith("2026") or end_date.startswith("2025")):
+        if is_current or (end_date and (end_date.startswith("2026") or end_date.startswith("2025"))):
             if any(t in title for t in engineering_titles):
                 return 1
     return 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. DOMAIN PENALTY
+# ─────────────────────────────────────────────────────────────────────────────
+def calculate_domain_penalty(candidate):
+    """
+    The JD explicitly says: "People whose primary expertise is computer vision, speech, 
+    or robotics without significant NLP/IR exposure... you'd be re-learning fundamentals here."
+    Penalize CV, Speech, Frontend, DevOps/non-ML roles if they lack search/ranking experience.
+    
+    Design decisions:
+    - 'backend engineer' REMOVED — backend engineers on search infra are not bad fits
+    - Penalty uses recent 2 roles + current title only (career trajectory matters; a
+      past CV role doesn't disqualify someone now doing NLP/ranking work)
+    - Pure bad domain with no NLP crossover = 0.2 (near-zero, JD says 'will not move forward')
+    """
+    # JD explicit disqualifiers: CV, Speech, Robotics, pure Frontend/UX, non-tech roles
+    bad_domains = [
+        'computer vision', 'frontend engineer', 'frontend developer', 'ui developer',
+        'ux designer', 'ui/ux', 'devops engineer', 'site reliability', 'speech recognition',
+        'robotics engineer', 'sysadmin', 'marketing manager', 'hr manager',
+        'content writer', 'graphic designer', 'product designer'
+    ]
+    # Presence of any NLP/IR/ML signal redeems a bad-domain candidate
+    nlp_domains = [
+        'nlp', 'search', 'ranking', 'recommendation', 'retrieval', 'llm',
+        'machine learning', 'data scientist', 'ai engineer', 'ml engineer',
+        'applied scientist', 'applied ml'
+    ]
+
+    current_title = candidate.get('profile', {}).get('current_title', '').lower()
+    # Only look at current + last 2 roles for domain check (trajectory matters)
+    recent_jobs = candidate.get('career_history', [])[:2]
+    recent_titles = [job.get('title', '').lower() for job in recent_jobs]
+    check_titles = recent_titles + [current_title]
+    all_titles = [job.get('title', '').lower() for job in candidate.get('career_history', [])] + [current_title]
+
+    # Is the RECENT career in a bad domain?
+    is_bad_domain_recent = any(any(bad in t for bad in bad_domains) for t in check_titles)
+    if not is_bad_domain_recent:
+        return 1.0
+
+    # Does ANY part of career have NLP/ML/IR crossover?
+    has_nlp = any(any(nlp in t for nlp in nlp_domains) for t in all_titles)
+    if has_nlp:
+        return 0.7  # Mixed trajectory — moderate penalty
+    return 0.2     # Pure bad domain, no crossover — JD says 'will not move forward'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. CONSULTING PENALTY
@@ -361,9 +408,10 @@ def calculate_research_penalty(candidate):
         return 0.95
     else:
         # No production evidence + research titles
+        # JD explicitly says 'pure research environments... we will not move forward'
         if research_ratio > 0.5:
-            return 0.6   # Mostly research career — heavy penalty
-        return 0.75      # Some research roles — moderate penalty
+            return 0.3   # Mostly research career — very heavy penalty (was 0.6)
+        return 0.65      # Some research roles — moderate penalty (was 0.75)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. PRODUCTION DEPTH BOOST (rewards multi-company production experience)
@@ -431,10 +479,16 @@ def main():
 
     # ── Load model and encode JD ─────────────────────────────────────────────
     print("Loading Semantic Model...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+        
     print(f"Using device: {device}")
     model = SentenceTransformer(config.EMBEDDING_MODEL_NAME, device=device)
-    encode_batch_size = 256 if device == "cuda" else 64
+    encode_batch_size = 256 if device in ["cuda", "mps"] else 64
     jd_emb = load_or_encode_jd(model, JD_INTENT)
     
     print("Encoding all unique skills for corroboration...")
@@ -470,7 +524,8 @@ def main():
             "honeypot_flags": hp,
             "behavioral_multiplier": beh_signals.get("behavioral_multiplier", 1.0),
             "jd_fit_multiplier": beh_signals.get("jd_fit_multiplier", 1.0),
-            "narrative_authenticity": narrative_authenticity(c, filler_templates)
+            "narrative_authenticity": narrative_authenticity(c, filler_templates),
+            "domain_penalty": calculate_domain_penalty(c)
         }
         features[cid] = feat
         
@@ -555,6 +610,22 @@ def main():
         json.dump(features, f)
     with open(config.CANDIDATE_DATA_PATH, "wb") as f:
         pickle.dump(candidates, f)
+
+    # ── Download Cross Encoder ───────────────────────────────────────────────
+    print("Pre-downloading Cross Encoder model for offline ranking...")
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    ce_path = os.path.join(config.ARTIFACTS_DIR, "ce_model")
+    if not os.path.exists(ce_path):
+        os.makedirs(ce_path, exist_ok=True)
+        print("Downloading tokenizer...")
+        tok = AutoTokenizer.from_pretrained(config.CROSS_ENCODER_MODEL_NAME)
+        tok.save_pretrained(ce_path)
+        print("Downloading model...")
+        ce = AutoModelForSequenceClassification.from_pretrained(config.CROSS_ENCODER_MODEL_NAME)
+        ce.save_pretrained(ce_path)
+        print("Cross-Encoder saved locally.")
+    else:
+        print("Cross-Encoder already cached.")
 
     print(f"\n✅ Pre-computation complete in {time.time() - start_time:.2f}s.")
 

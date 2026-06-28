@@ -40,11 +40,12 @@ def main():
     if len(jd_emb.shape) == 1:
         jd_emb = jd_emb.reshape(1, -1)
         
-    if torch.cuda.is_available():
-        print("Using GPU for fast matrix multiplication...")
-        career_tensor = torch.tensor(career_embs, device='cuda', dtype=torch.float16)
-        skills_tensor = torch.tensor(skills_embs, device='cuda', dtype=torch.float16)
-        jd_tensor = torch.tensor(jd_emb.T, device='cuda', dtype=torch.float16)
+    if torch.cuda.is_available() or torch.backends.mps.is_available():
+        device = 'cuda' if torch.cuda.is_available() else 'mps'
+        print(f"Using {device.upper()} for fast matrix multiplication...")
+        career_tensor = torch.tensor(career_embs, device=device, dtype=torch.float16 if device == 'cuda' else torch.float32)
+        skills_tensor = torch.tensor(skills_embs, device=device, dtype=torch.float16 if device == 'cuda' else torch.float32)
+        jd_tensor = torch.tensor(jd_emb.T, device=device, dtype=torch.float16 if device == 'cuda' else torch.float32)
         
         career_sims = torch.matmul(career_tensor, jd_tensor).cpu().numpy().flatten()
         skills_sims = torch.matmul(skills_tensor, jd_tensor).cpu().numpy().flatten()
@@ -78,7 +79,10 @@ def main():
         if recency > 0: rule_score += 0.25
         rule_score += min(0.25, rank_exp * 0.05)
         if consult > 0.5: rule_score += 0.15
-        if prod_score == 0 or recency == 0: rule_score = 0.0
+        # Hard gate: both production evidence AND recency must be zero to nullify.
+        # Using OR was too aggressive — it zeroed out candidates with recent non-ML
+        # engineering roles that still have ranking/search experience in descriptions.
+        if prod_score == 0 and recency == 0: rule_score = 0.0
             
         # ── Pillar 2: Stage 1 Semantic Score (0.0 to 1.0)
         sem_score_career = (float(career_sims[i]) + 1) / 2.0
@@ -86,16 +90,19 @@ def main():
         
         authenticity = feat.get('narrative_authenticity', 1.0)
         
-        # Priority 3: Multiply base semantic score by authenticity score
-        base_sem_score = 0.5 * sem_score_career + 0.5 * sem_score_skills
-        stage1_sem_score = base_sem_score * authenticity
+        # Priority 3: Dynamic blending based on authenticity
+        career_weight = 0.3 + (0.4 * authenticity)
+        skills_weight = 1.0 - career_weight
+        
+        stage1_sem_score = (career_weight * sem_score_career) + (skills_weight * sem_score_skills)
         
         # ── Pillar 3: Credibility Score (Anti-Stuffer)
         cred_score = (
             feat.get('skill_corroboration_penalty', 1.0) * 
             feat.get('tech_credibility', 1.0) * 
             feat.get('consulting_penalty', 1.0) *
-            feat.get('career_consistency_penalty', 1.0)
+            feat.get('career_consistency_penalty', 1.0) *
+            feat.get('domain_penalty', 1.0)
         )
         
         hp = feat.get('honeypot_flags', {})
@@ -135,61 +142,67 @@ def main():
     t = time.time()
 
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    from sentence_transformers import SentenceTransformer
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
-    # Load bi-encoder once for smart job selection (Top-3 relevant jobs per candidate).
-    # Only runs on 500 candidates — fast enough online (<15s on CPU).
-    print("Loading bi-encoder for smart job selection...")
-    bi_encoder = SentenceTransformer(config.EMBEDDING_MODEL_NAME, device=str(device))
-    bi_encoder.eval()
-
-    def get_relevant_jobs(candidate, jd_vec, top_k=3):
+    def get_relevant_jobs_text(candidate):
         """
-        Select top-k most relevant job descriptions for a candidate by scoring
-        each job description individually against the JD using the bi-encoder.
-        This avoids the dumb first-512-token truncation that loses senior
-        candidates' most relevant (often earlier) roles.
-
-        Returns a single string of the top-k job texts concatenated.
+        Select the 3 most JD-relevant job descriptions for the cross-encoder.
+        Scores each role by keyword relevance (retrieval / ranking / production terms)
+        weighted by duration, then returns the top 3 concatenated.
+        
+        Better than boolean sort: an ML engineer with 24mo of embedding work ranks
+        above a data engineer with 1mo of vague 'search analytics' mentions.
         """
-        job_scores = []
+        JD_KEYWORDS = [
+            'retrieval', 'ranking', 'search', 'recommendation', 'embedding', 'vector',
+            'semantic', 'nlp', 'machine learning', 'deployed', 'production', 'shipped',
+            'pipeline', 'faiss', 'pinecone', 'qdrant', 'weaviate', 'milvus',
+            'elasticsearch', 'opensearch', 'llm', 'rag', 'transformer', 'pytorch'
+        ]
+        scored_jobs = []
         for job in candidate.get('career_history', []):
-            text = job.get('description', '').strip()
-            if not text:
+            desc = job.get('description', '').strip()
+            if not desc:
                 continue
-            # Encode this single job description on-the-fly
-            emb = bi_encoder.encode(
-                ["Represent this document for retrieval: " + text[:400]],
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False
-            )
-            sim = float(np.dot(emb.flatten(), jd_vec.flatten()))
-            job_scores.append((sim, text[:400]))
+            desc_lower = desc.lower()
+            title_lower = job.get('title', '').lower()
+            duration = job.get('duration_months', 1) or 1
 
-        # Sort by descending similarity, take top-k
-        job_scores.sort(key=lambda x: -x[0])
-        top_texts = [text for _, text in job_scores[:top_k]]
-        return " ".join(top_texts) if top_texts else ""
+            # Keyword hit count, weighted by log-duration for longer roles
+            hits = sum(1 for kw in JD_KEYWORDS if kw in desc_lower or kw in title_lower)
+            relevance = hits * math.log1p(duration)
+            scored_jobs.append((relevance, desc[:400]))
 
-    # Flatten JD embedding for dot-product comparison inside get_relevant_jobs
-    jd_vec = jd_emb.flatten()
+        # Sort descending by relevance score, take top 3
+        scored_jobs.sort(key=lambda x: -x[0])
+        top_texts = [desc for _, desc in scored_jobs[:3]]
+        return " ".join(top_texts)
 
-    # Load cross-encoder model
-    tokenizer = AutoTokenizer.from_pretrained(config.CROSS_ENCODER_MODEL_NAME)
-    ce_model = AutoModelForSequenceClassification.from_pretrained(config.CROSS_ENCODER_MODEL_NAME)
+    # Load cross-encoder model locally (cached during precompute)
+    print("Loading Cross-Encoder model locally...")
+    ce_path = os.path.join(config.ARTIFACTS_DIR, "ce_model")
+    if not os.path.exists(ce_path):
+        raise FileNotFoundError(
+            f"Cross-encoder not cached at '{ce_path}'. "
+            "Run precompute.py first — it downloads and saves the model offline."
+        )
+    tokenizer = AutoTokenizer.from_pretrained(ce_path)
+    ce_model = AutoModelForSequenceClassification.from_pretrained(ce_path)
     ce_model.eval()
     ce_model.to(device)
 
     # Build (JD, smart_career_text) pairs for the Top 500
-    print("Selecting top-3 most relevant jobs per candidate for cross-encoder input...")
+    print("Building text for cross-encoder input...")
     pairs = []
     for candidate_tuple in top_500:
         idx = candidate_tuple[2]
         c = cdata[idx]
-        # Smart selection: top-3 most JD-relevant job descriptions
-        career_text = get_relevant_jobs(c, jd_vec, top_k=3)
+        career_text = get_relevant_jobs_text(c)[:300]  # Reserve token budget for JD (~180 tokens)
         pairs.append([JD_INTENT, career_text])
         
     ce_logits = []
@@ -223,7 +236,15 @@ def main():
         _, cid, idx, stage1_sem_score, rule_score, cred_score, beh_mult, jd_fit = candidate_tuple
         
         ce_score = ce_scores_normalized[i]
-        sem_final = 0.5 * stage1_sem_score + 0.5 * ce_score
+
+        # Dynamic CE weight: when narrative_authenticity is LOW (synthetic career text),
+        # the bi-encoder career embedding is unreliable — trust the CE more.
+        # When authenticity is HIGH (genuine descriptions), both signals are reliable.
+        feat = feat_map.get(cid, {})
+        authenticity = feat.get('narrative_authenticity', 1.0)
+        ce_weight = 0.5 + (0.3 * (1.0 - authenticity))  # CE weight: 0.50 (authentic) → 0.80 (filler)
+        bi_weight = 1.0 - ce_weight
+        sem_final = bi_weight * stage1_sem_score + ce_weight * ce_score
         
         blend = (
             0.3 * rule_score +

@@ -121,8 +121,10 @@ def run_honeypot_checks(candidate, global_skill_freq):
             flags.append("H05")
             hard_flag = True
             
-        # H08: Expert/Advanced with 0 months
-        if prof_level in ["expert", "advanced"] and dur == 0:
+        # H08: Expert/Advanced with 0 months — only fire if field explicitly set to 0
+        # IMPORTANT: duration_months is optional in the schema (candidate_schema.json).
+        # If the field is missing (None), this is a data gap, NOT a honeypot signal.
+        if prof_level in ["expert", "advanced"] and sk.get("duration_months") is not None and dur == 0:
             flags.append("H08")
             hard_flag = True
             
