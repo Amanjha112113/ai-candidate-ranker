@@ -41,7 +41,7 @@ graph LR
         direction TB
         C[precompute.py]
         D[Behavioral & Honeypot Checks]
-        E[Semantic Encoding BAAI/bge-large]
+        E[Semantic Encoding BAAI/bge-small]
         C --> D
         C --> E
     end
@@ -144,7 +144,7 @@ graph LR
 **Phase 1: Offline Pre-computation**
 1. **Data Ingestion:** Parse the raw `candidates.jsonl` dataset and JD.
 2. **Feature Extraction:** Compute logical honeypots, recency, production scores, and behavioral multipliers.
-3. **Semantic Embedding:** Use `BAAI/bge-large-en-v1.5` to convert text into optimized 1024-dim semantic vectors.
+3. **Semantic Embedding:** Use `BAAI/bge-small-en-v1.5` to convert text into optimized 384-dim semantic vectors.
 4. **Artifact Caching:** Save embeddings, features, and the Cross-Encoder model locally to disk.
 
 **Phase 2: Online Ranking Engine**
@@ -160,7 +160,7 @@ graph LR
 * **Python 3:** The backbone language for orchestration and data manipulation.
 * **PyTorch:** Leveraged for high-speed tensor matrix multiplication. It detects and uses NVIDIA GPUs (`cuda`), Apple Silicon (`mps`), or CPUs seamlessly—ensuring extreme performance on any laptop.
 * **Hugging Face (`sentence-transformers`):** Allows us to run massive AI models completely locally.
-* **BAAI Open-Source Suite:** `bge-large-en-v1.5` (Bi-Encoder) and `bge-reranker-base` (Cross-Encoder) offer near-GPT-4 semantic understanding without requiring internet-dependent APIs.
+* **BAAI Open-Source Suite:** `bge-small-en-v1.5` (Bi-Encoder) and `bge-reranker-base` (Cross-Encoder) offer near-GPT-4 semantic understanding without requiring internet-dependent APIs.
 * **NumPy (`.npy`) Binaries & Pickle:** Massive datasets are serialized into binary formats for hyper-fast disk-to-memory loading during the online phase.
 
 ---
